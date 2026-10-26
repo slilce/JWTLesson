@@ -21,6 +21,10 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.example.jwtlesson.security.CustomUserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+
+
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -35,24 +39,45 @@ public class UserLoginService {
     private final RoleRepository roleRepository;
     private final PasswordEncoder passwordEncoder;
 
-    /**
-     * 1. AuthenticationManager checks name + password (throws BadCredentialsException if wrong)
-     * 2. JwtUtil creates a signed token for the authenticated user
-     */
-    public LoginResponse login(LoginRequest request) {
-        Authentication authentication = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(request.username(), request.password()));
+    private final RefreshTokenService refreshTokenService;
+    private final CustomUserDetailsService userDetailsService;
 
-        UserDetails userDetails = (UserDetails) authentication.getPrincipal();
-        String token = jwtUtil.generateToken(userDetails);
+
+
+    @Transactional
+    public LoginResponse login(LoginRequest request) {
+        Authentication authentication =
+                authenticationManager.authenticate(
+                        new UsernamePasswordAuthenticationToken(
+                                request.username(),
+                                request.password()
+                        )
+                );
+
+        UserDetails userDetails =
+                (UserDetails) authentication.getPrincipal();
+
+        User user = userRepository
+                .findByUsername(userDetails.getUsername())
+                .orElseThrow();
+
+        String accessToken = jwtUtil.generateToken(userDetails);
+        String refreshToken = refreshTokenService.create(user);
 
         List<String> roles = userDetails.getAuthorities().stream()
                 .map(GrantedAuthority::getAuthority)
                 .toList();
 
-        return new LoginResponse(token, "Bearer", jwtUtil.getExpirationMs(),
-                userDetails.getUsername(), roles);
+        return new LoginResponse(
+                accessToken,
+                "Bearer",
+                jwtUtil.getExpirationMs(),
+                userDetails.getUsername(),
+                roles,
+                refreshToken
+        );
     }
+
 
     /** New users always get ROLE_USER only. Admins are never created through this endpoint. */
     @Transactional
@@ -71,5 +96,31 @@ public class UserLoginService {
                 .build();
 
         return UserResponse.from(userRepository.save(user));
+
+
     }
+
+    public LoginResponse refresh(String oldRefreshToken) {
+        RefreshTokenService.Rotation rotation =
+                refreshTokenService.rotate(oldRefreshToken);
+
+        UserDetails userDetails = userDetailsService
+                .loadUserByUsername(rotation.username());
+
+        String newAccessToken = jwtUtil.generateToken(userDetails);
+
+        List<String> roles = userDetails.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .toList();
+
+        return new LoginResponse(
+                newAccessToken,
+                "Bearer",
+                jwtUtil.getExpirationMs(),
+                userDetails.getUsername(),
+                roles,
+                rotation.refreshToken()
+        );
+    }
+
 }
